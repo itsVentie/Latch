@@ -3,7 +3,7 @@
 
 A lightweight infrastructure proxy server (Client/Server architecture) engineered to secure legacy TCP application traffic against interception (sniffing) and retrospective decryption utilizing quantum cryptanalysis methodologies (e.g., Shor's algorithm).
 
-## Architecture & Cryptographic Stack
+## Architecture
 
 The project implements a **Crypto-Agility** paradigm through a hybrid key exchange mechanism, combining classical elliptic curve cryptography with post-quantum lattice-based key encapsulation mechanisms.
 
