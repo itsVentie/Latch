@@ -1,77 +1,65 @@
 # pqc-proxy (Hybrid Post-Quantum TCP Tunnel)
 
-A lightweight infrastructure proxy server (Client/Server architecture) engineered to secure legacy TCP application traffic against interception (sniffing) and retrospective decryption utilizing quantum cryptanalysis methodologies (e.g., Shor's algorithm).
+A lightweight infrastructure proxy server engineered to secure legacy TCP traffic against interception and future quantum cryptanalysis (Shor's algorithm).
+
+## What's New in 1.0.1
+
+* **Secure Handshake Authentication:** Implemented HMAC-based authentication to prevent unauthorized connection attempts.
+* **Automation Suite:** Added `test.ps1` for comprehensive validation (vet, race detection, and build).
+* **Improved Stability:** Enhanced internal error handling for port binding and process lifecycle.
 
 ## Why Post-Quantum?
 
-Traditional cryptography (RSA, ECDH) relies on the hardness of integer factorization and discrete logarithms. Large-scale quantum computers will render these obsolete. **pqc-proxy** provides an immediate security layer for legacy applications by implementing a hybrid approach, combining classical security with lattice-based cryptography today, ensuring "harvest now, decrypt later" protection.
+Traditional cryptography (RSA, ECDH) is vulnerable to future quantum computers. **pqc-proxy** implements a hybrid security layer:
 
-## Architecture
-
-The project implements a **Crypto-Agility** paradigm through a hybrid key exchange mechanism.
-
-* **Classical Layer:** Diffie-Hellman over Curve25519 (`X25519`).
-* **Post-Quantum Layer:** `ML-KEM-768` (NIST FIPS 203 standard).
-* **KDF:** `HKDF-SHA256` (concatenated shared secrets).
-* **Transport Layer (AEAD):** `ChaCha20-Poly1305` with per-frame monotonicity.
-* **Performance:** Zero-Allocation Pipeline using `sync.Pool`.
-
-## Project Structure
-
-```text
-├── .github/workflows/   # CI/CD pipelines (GitHub Actions)
-├── cmd/
-│   └── pqc-proxy/       # Application entry point
-├── deployments/         # Docker Compose and Prometheus manifests
-├── internal/
-│   ├── config/          # Configuration parsing
-│   ├── crypto/          # Cryptographic core engine
-│   ├── network/         # Client, Server, Chaos injection & Pipe tests
-│   └── ...
-├── scripts/             # Automation scripts
-└── web/                 # Monitoring dashboard static files
-
-```
-
-## Compilation
-
-Compile from the root directory:
-
-**Windows:** `go build -o pqc-proxy.exe ./cmd/pqc-proxy`
-
-**Linux/macOS:** `go build -o pqc-proxy ./cmd/pqc-proxy`
-
-## Verification & Testing
-
-The project features a comprehensive test suite covering cryptographic primitives and network pipeline stability.
-
-```bash
-# Validate cryptographic integrity and network pipe logic
-go test -v ./internal/...
-
-```
+* **Classical Layer:** `X25519` (Diffie-Hellman).
+* **Quantum-Resistant Layer:** `ML-KEM-768` (NIST FIPS 203).
+* **Auth Layer:** HMAC-SHA256 token verification.
 
 ## Quick Start Topology
 
 ```text
-[Client App] -> (Local:3000) -> [PQC Client] -> (Tunnel:9090) -> [PQC Server] -> (Target:8000) -> [Backend App]
+[Client App] -> (Local:3000) -> [PQC Client] -> (Encrypted Tunnel) -> [PQC Server] -> (Target:8000) -> [Backend App]
 
 ```
 
-1. **Start Backend:** `python -m http.server 8000`
-2. **Start Server:** `./pqc-proxy -mode server -listen :9090 -target 127.0.0.1:8000`
-3. **Start Client:** `./pqc-proxy -mode client -listen :3000 -target 127.0.0.1:9090`
-4. **Access:** `curl http://127.0.0.1:3000`
+1. **Start Server:**
+```bash
+./pqc-proxy -mode server -listen :9090 -target 127.0.0.1:8000 -secret "YourStrongSecret"
 
-## Status & Roadmap
+```
+
+
+2. **Start Client:**
+```bash
+./pqc-proxy -mode client -listen :3000 -target 127.0.0.1:9090 -secret "YourStrongSecret"
+
+```
+
+
+
+## Verification & Automation
+
+We provide an automated script to ensure the integrity of the codebase, including static analysis and race detection:
+
+**Windows:**
+
+```powershell
+.\test.ps1
+
+```
+
+## Security Design
+
+The system utilizes a two-stage verification process:
+
+1. **Auth Layer:** HMAC-SHA256 token exchange (using a pre-shared secret). Unauthorized packets are dropped before initiating heavy PQC key exchanges.
+2. **Encryption Layer:** Hybrid KEM exchange followed by `ChaCha20-Poly1305` transport encryption.
+
+## Roadmap
 
 * [x] Hybrid Key Exchange (X25519 + ML-KEM-768)
-* [x] AEAD Transport Encryption (ChaCha20-Poly1305)
-* [x] CI/CD Pipeline (GitHub Actions)
-* [x] Chaos Testing Framework
+* [x] HMAC-based Connection Auth
+* [x] CI/CD Pipeline & Auto-testing
 * [ ] UDP Support
 * [ ] Certificate-based Authentication
-
-## License
-
-Distributed under the MIT License.

@@ -5,8 +5,6 @@ import (
 	"os"
 )
 
-var Log *slog.Logger
-
 func Init(debug bool) {
 	level := slog.LevelInfo
 	if debug {
@@ -17,6 +15,11 @@ func Init(debug bool) {
 		Level: level,
 	}
 
-	Log = slog.New(slog.NewJSONHandler(os.Stdout, opts))
-	slog.SetDefault(Log)
+	var handler slog.Handler
+	if debug {
+		handler = slog.NewTextHandler(os.Stdout, opts)
+	} else {
+		handler = slog.NewJSONHandler(os.Stdout, opts)
+	}
+	slog.SetDefault(slog.New(handler))
 }

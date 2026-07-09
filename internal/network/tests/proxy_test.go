@@ -1,4 +1,4 @@
-package network
+package network_test
 
 import (
 	"net"
@@ -12,7 +12,7 @@ func TestProxyPipe(t *testing.T) {
 
 	go func() {
 		defer client.Close()
-		client.Write(testData)
+		_, _ = client.Write(testData)
 	}()
 
 	buf := make([]byte, 16)

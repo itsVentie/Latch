@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,17 +16,18 @@ import (
 func main() {
 	cfg := config.Load()
 
+	logger.Init(cfg.Debug)
+
 	if cfg.Mode != "client" && cfg.Mode != "server" {
-		fmt.Println("Usage: pqc-proxy -mode [client|server] -listen [addr] -target [addr]")
+		slog.Error("Invalid execution mode", "mode", cfg.Mode, "expected", "client|server")
 		os.Exit(1)
 	}
 
 	if cfg.ListenAddr == "" || cfg.TargetAddr == "" {
-		fmt.Println("Error: both -listen and -target parameters are required")
+		slog.Error("Missing required network parameters", "listen", cfg.ListenAddr, "target", cfg.TargetAddr)
 		os.Exit(1)
 	}
 
-	logger.Init(cfg.Debug)
 	slog.Info("Initializing pqc-proxy", "mode", cfg.Mode, "version", "0.1.4")
 
 	pqcKeys, err := crypto.GenerateKeyPair()
