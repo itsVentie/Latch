@@ -44,11 +44,34 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-Write-Host "--- Building project ---" -ForegroundColor Green
-go build -ldflags="-s -w" -v -o pqc-proxy.exe ./cmd/pqc-proxy/main.go
-if ($LASTEXITCODE -eq 0) {
-    Write-Host "Everything is OK. Build successful." -ForegroundColor Green
-} else {
-    Write-Host "Build failed." -ForegroundColor Red
+Write-Host "--- Building project for Windows and Linux ---" -ForegroundColor Green
+
+$packagePath = "./cmd/pqc-proxy"
+$distDir = "./dist"
+
+if (-not (Test-Path $distDir)) {
+    New-Item -ItemType Directory -Path $distDir > $null
+}
+
+Write-Host "Building Windows binary (dist/pqc-proxy.exe)..." -ForegroundColor Yellow
+$env:GOOS = "windows"
+$env:GOARCH = "amd64"
+go build -ldflags="-s -w" -o "$distDir/pqc-proxy.exe" $packagePath
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Windows build failed." -ForegroundColor Red
     exit 1
 }
+
+Write-Host "Building Linux binary (dist/pqc-proxy-linux)..." -ForegroundColor Yellow
+$env:GOOS = "linux"
+$env:GOARCH = "amd64"
+go build -ldflags="-s -w" -o "$distDir/pqc-proxy-linux" $packagePath
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Linux build failed." -ForegroundColor Red
+    $env:GOOS = "windows"
+    exit 1
+}
+
+$env:GOOS = "windows"
+
+Write-Host "Everything is OK. Both builds saved to /dist successfully" -ForegroundColor Green
