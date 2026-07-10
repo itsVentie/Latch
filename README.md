@@ -2,11 +2,12 @@
 
 A lightweight infrastructure proxy server engineered to secure legacy TCP traffic against interception and future quantum cryptanalysis (Shor's algorithm).
 
-## What's New in 1.0.1
+## What's New in 1.0.2
 
-* **Secure Handshake Authentication:** Implemented HMAC-based authentication to prevent unauthorized connection attempts.
-* **Automation Suite:** Added `test.ps1` for comprehensive validation (vet, race detection, and build).
-* **Improved Stability:** Enhanced internal error handling for port binding and process lifecycle.
+* **Structured Production Logging:** Fully migrated from standard text logs to Go's native `log/slog` library. Supports structured attributes (e.g., `remote_addr`, `local_addr`) and configurable log levels (`Debug`, `Info`, `Warn`, `Error`).
+* **High-Load Performance Benchmarks:** Added network pipeline micro-benchmarking (`BenchmarkProxyPipe`) to validate data transfer efficiency under heavy load.
+* **Zero-Allocation Core:** Verified `0 B/op` and `0 allocs/op` on the critical data path due to optimized `sync.Pool` buffer recycling, ensuring no garbage collection overhead during peak traffic.
+* **Stabilized Integration Tests:** Resolved race conditions and fixed port lifecycle management within the end-to-end automated testing environment.
 
 ## Why Post-Quantum?
 
@@ -24,28 +25,34 @@ Traditional cryptography (RSA, ECDH) is vulnerable to future quantum computers. 
 ```
 
 1. **Start Server:**
+
 ```bash
 ./pqc-proxy -mode server -listen :9090 -target 127.0.0.1:8000 -secret "YourStrongSecret"
 
 ```
 
-
 2. **Start Client:**
+
 ```bash
 ./pqc-proxy -mode client -listen :3000 -target 127.0.0.1:9090 -secret "YourStrongSecret"
 
 ```
 
-
-
 ## Verification & Automation
 
-We provide an automated script to ensure the integrity of the codebase, including static analysis and race detection:
+We provide automated tools to ensure the integrity of the codebase, check performance metrics, and audit memory allocations:
 
-**Windows:**
+**Run Formatting, Linter, and Race Detector:**
 
 ```powershell
 .\test.ps1
+
+```
+
+**Run Micro-benchmarks and Allocation Audit:**
+
+```bash
+go test -run=^$ -bench=BenchmarkProxyPipe -benchmem ./internal/network/tests/...
 
 ```
 
@@ -61,5 +68,8 @@ The system utilizes a two-stage verification process:
 * [x] Hybrid Key Exchange (X25519 + ML-KEM-768)
 * [x] HMAC-based Connection Auth
 * [x] CI/CD Pipeline & Auto-testing
-* [ ] UDP Support
-* [ ] Certificate-based Authentication
+* [x] Structured JSON/Text Logging via `log/slog`
+* [x] High-Load Benchmarking and Memory Profiling (Zero-Allocation verified)
+* [ ] Certificate-based Authentication / Mutual TLS (mTLS)
+* [ ] Session Resumption (Fast Reconnect) to Hybrid Handshake
+* [ ] UDP Encapsulation / Tunneling
