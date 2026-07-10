@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -15,15 +16,15 @@ type Server struct {
 	targetAddr string
 	listener   net.Listener
 	pqcKeys    *crypto.PQCKeyPair
-	Secret     string
+	TLSConfig  *tls.Config
 }
 
-func NewServer(listenAddr, targetAddr string, keys *crypto.PQCKeyPair, secret string) *Server {
+func NewServer(listenAddr, targetAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Server {
 	return &Server{
 		listenAddr: listenAddr,
 		targetAddr: targetAddr,
 		pqcKeys:    keys,
-		Secret:     secret,
+		TLSConfig:  tlsConfig,
 	}
 }
 
@@ -44,7 +45,6 @@ func (s *Server) Start() error {
 			continue
 		}
 
-		InjectChaos(conn)
 		go s.handleConnection(conn)
 	}
 }
@@ -59,24 +59,18 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	defer clientConn.Close()
 	remoteAddr := clientConn.RemoteAddr().String()
 
-	slog.Debug("Handling incoming server connection", "remote_addr", remoteAddr)
-
-	if s.Secret != "" {
-		tokenBuf := make([]byte, 64)
-		_, err := io.ReadFull(clientConn, tokenBuf)
-		if err != nil {
-			slog.Error("Failed to read server auth token", "remote_addr", remoteAddr, "error", err)
+	if s.TLSConfig != nil {
+		tlsConn := tls.Server(clientConn, s.TLSConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			slog.Error("Server mTLS handshake failed", "remote_addr", remoteAddr, "error", err)
 			return
 		}
-
-		if !crypto.VerifyAuthToken(string(tokenBuf), s.Secret, "v1") {
-			slog.Warn("Invalid server auth token provided", "remote_addr", remoteAddr)
-			return
-		}
-		slog.Debug("Server auth token verified successfully", "remote_addr", remoteAddr)
+		clientConn = tlsConn
 	}
 
-	clientInceptionBlob := make([]byte, 32+1184)
+	slog.Debug("Handling incoming server connection", "remote_addr", remoteAddr)
+
+	clientInceptionBlob := make([]byte, crypto.ClientInceptionSize)
 	if _, err := io.ReadFull(clientConn, clientInceptionBlob); err != nil {
 		slog.Error("Failed to read server inception blob", "remote_addr", remoteAddr, "error", err)
 		return

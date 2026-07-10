@@ -11,6 +11,14 @@ import (
 	"golang.org/x/crypto/hkdf"
 )
 
+const (
+	X25519PublicKeySize    = 32
+	MLKEM768PublicKeySize  = 1184
+	MLKEM768CiphertextSize = 1088
+	ClientInceptionSize    = X25519PublicKeySize + MLKEM768PublicKeySize
+	ServerResponseSize     = X25519PublicKeySize + MLKEM768CiphertextSize
+)
+
 type KeyExchangeResult struct {
 	SharedMasterKey []byte
 	PublicKeyBlob   []byte
@@ -29,7 +37,7 @@ func GenerateClientInception() (*ecdh.PrivateKey, *mlkem.DecapsulationKey768, []
 	}
 	mlkemPub := mlkemPriv.EncapsulationKey().Bytes()
 
-	blob := make([]byte, 0, len(ecdhPub)+len(mlkemPub))
+	blob := make([]byte, 0, ClientInceptionSize)
 	blob = append(blob, ecdhPub...)
 	blob = append(blob, mlkemPub...)
 
@@ -37,13 +45,12 @@ func GenerateClientInception() (*ecdh.PrivateKey, *mlkem.DecapsulationKey768, []
 }
 
 func ServerHandleInception(clientBlob []byte) ([]byte, []byte, error) {
-	x25519KeySize := 32
-	if len(clientBlob) < x25519KeySize {
+	if len(clientBlob) < ClientInceptionSize {
 		return nil, nil, fmt.Errorf("invalid client blob size")
 	}
 
-	clientEcdhPubBytes := clientBlob[:x25519KeySize]
-	clientMlkemPubBytes := clientBlob[x25519KeySize:]
+	clientEcdhPubBytes := clientBlob[:X25519PublicKeySize]
+	clientMlkemPubBytes := clientBlob[X25519PublicKeySize:ClientInceptionSize]
 
 	serverEcdhPriv, err := ecdh.X25519().GenerateKey(rand.Reader)
 	if err != nil {
@@ -73,7 +80,7 @@ func ServerHandleInception(clientBlob []byte) ([]byte, []byte, error) {
 	}
 
 	serverEcdhPubBytes := serverEcdhPriv.PublicKey().Bytes()
-	responseBlob := make([]byte, 0, len(serverEcdhPubBytes)+len(mlkemCiphertext))
+	responseBlob := make([]byte, 0, ServerResponseSize)
 	responseBlob = append(responseBlob, serverEcdhPubBytes...)
 	responseBlob = append(responseBlob, mlkemCiphertext...)
 
@@ -81,13 +88,12 @@ func ServerHandleInception(clientBlob []byte) ([]byte, []byte, error) {
 }
 
 func ClientHandleResponse(ecdhPriv *ecdh.PrivateKey, mlkemPriv *mlkem.DecapsulationKey768, serverBlob []byte) ([]byte, error) {
-	x25519KeySize := 32
-	if len(serverBlob) < x25519KeySize {
+	if len(serverBlob) < ServerResponseSize {
 		return nil, fmt.Errorf("invalid server blob size")
 	}
 
-	serverEcdhPubBytes := serverBlob[:x25519KeySize]
-	serverMlkemCiphertext := serverBlob[x25519KeySize:]
+	serverEcdhPubBytes := serverBlob[:X25519PublicKeySize]
+	serverMlkemCiphertext := serverBlob[X25519PublicKeySize:ServerResponseSize]
 
 	serverEcdhPub, err := ecdh.X25519().NewPublicKey(serverEcdhPubBytes)
 	if err != nil {

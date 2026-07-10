@@ -12,9 +12,8 @@ func InjectChaos(conn net.Conn) {
 	threshold := rand.Intn(100)
 
 	if threshold < 5 {
-		time.Sleep(time.Duration(rand.Intn(1000)) * time.Millisecond)
-		conn.Close()
-	} else if threshold < 10 {
-		time.Sleep(time.Duration(rand.Intn(200)) * time.Millisecond)
+		time.Sleep(time.Duration(rand.Intn(500)) * time.Millisecond)
+	} else if threshold < 15 {
+		time.Sleep(time.Duration(rand.Intn(100)) * time.Millisecond)
 	}
 }

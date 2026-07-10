@@ -1,7 +1,13 @@
 package network_test
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"io"
+	"math/big"
 	"net"
 	"testing"
 	"time"
@@ -11,8 +17,6 @@ import (
 )
 
 func TestEndToEndProxy(t *testing.T) {
-	secret := "test-secret-key-32-bytes-long-hmac"
-
 	pqcKeys, err := crypto.GenerateKeyPair()
 	if err != nil {
 		t.Fatalf("Failed to generate PQC keys for test: %v", err)
@@ -33,13 +37,18 @@ func TestEndToEndProxy(t *testing.T) {
 		_, _ = io.Copy(conn, conn)
 	}()
 
-	srv := network.NewServer("127.0.0.1:9090", "127.0.0.1:8000", pqcKeys, secret)
+	srvTLS, cliTLS, err := generateTestmTLSPair()
+	if err != nil {
+		t.Fatalf("Failed to generate mTLS configs: %v", err)
+	}
+
+	srv := network.NewServer("127.0.0.1:9090", "127.0.0.1:8000", pqcKeys, srvTLS)
 	go func() {
 		_ = srv.Start()
 	}()
 	defer srv.Stop()
 
-	cli := network.NewClient("127.0.0.1:3000", "127.0.0.1:9090", pqcKeys, secret)
+	cli := network.NewClient("127.0.0.1:3000", "127.0.0.1:9090", pqcKeys, cliTLS)
 	go func() {
 		_ = cli.Start()
 	}()
@@ -71,4 +80,105 @@ func TestEndToEndProxy(t *testing.T) {
 
 	conn.Close()
 	time.Sleep(50 * time.Millisecond)
+}
+
+func generateTestmTLSPair() (*tls.Config, *tls.Config, error) {
+	caPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject: pkix.Name{
+			Organization: []string{"PQC-Proxy-Test-CA"},
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageDigitalSignature,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+
+	caDer, err := x509.CreateCertificate(rand.Reader, &caTemplate, &caTemplate, &caPriv.PublicKey, caPriv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	caCert, err := x509.ParseCertificate(caDer)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srvPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srvTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(2),
+		Subject: pkix.Name{
+			Organization: []string{"PQC-Proxy-Test-Server"},
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		DNSNames:    []string{"localhost"},
+		IPAddresses: []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	srvDer, err := x509.CreateCertificate(rand.Reader, &srvTemplate, caCert, &srvPriv.PublicKey, caPriv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	srvCert := tls.Certificate{
+		Certificate: [][]byte{srvDer},
+		PrivateKey:  srvPriv,
+	}
+
+	cliPriv, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cliTemplate := x509.Certificate{
+		SerialNumber: big.NewInt(3),
+		Subject: pkix.Name{
+			Organization: []string{"PQC-Proxy-Test-Client"},
+		},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(time.Hour),
+		KeyUsage:    x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+
+	cliDer, err := x509.CreateCertificate(rand.Reader, &cliTemplate, caCert, &cliPriv.PublicKey, caPriv)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	cliCert := tls.Certificate{
+		Certificate: [][]byte{cliDer},
+		PrivateKey:  cliPriv,
+	}
+
+	certPool := x509.NewCertPool()
+	certPool.AddCert(caCert)
+
+	srvTLS := &tls.Config{
+		Certificates: []tls.Certificate{srvCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    certPool,
+	}
+
+	cliTLS := &tls.Config{
+		Certificates:       []tls.Certificate{cliCert},
+		RootCAs:            certPool,
+		InsecureSkipVerify: false,
+		ServerName:         "localhost",
+	}
+
+	return srvTLS, cliTLS, nil
 }

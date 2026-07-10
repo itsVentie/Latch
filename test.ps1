@@ -45,7 +45,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "--- Building project ---" -ForegroundColor Green
-go build -v -o pqc-proxy.exe ./cmd/pqc-proxy/main.go
+go build -ldflags="-s -w" -v -o pqc-proxy.exe ./cmd/pqc-proxy/main.go
 if ($LASTEXITCODE -eq 0) {
     Write-Host "Everything is OK. Build successful." -ForegroundColor Green
 } else {

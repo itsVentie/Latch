@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -15,15 +16,15 @@ type Client struct {
 	serverAddr string
 	listener   net.Listener
 	pqcKeys    *crypto.PQCKeyPair
-	Secret     string
+	TLSConfig  *tls.Config
 }
 
-func NewClient(listenAddr, serverAddr string, keys *crypto.PQCKeyPair, secret string) *Client {
+func NewClient(listenAddr, serverAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Client {
 	return &Client{
 		listenAddr: listenAddr,
 		serverAddr: serverAddr,
 		pqcKeys:    keys,
-		Secret:     secret,
+		TLSConfig:  tlsConfig,
 	}
 }
 
@@ -41,7 +42,6 @@ func (c *Client) Start() error {
 			return nil
 		}
 
-		InjectChaos(localConn)
 		go c.handleConnection(localConn)
 	}
 }
@@ -65,13 +65,13 @@ func (c *Client) handleConnection(localConn net.Conn) {
 	}
 	defer serverConn.Close()
 
-	if c.Secret != "" {
-		token := crypto.GenerateAuthToken(c.Secret, "v1")
-		_, err := serverConn.Write([]byte(token))
-		if err != nil {
-			slog.Error("Client failed to send auth token to server", "local_addr", localAddr, "error", err)
+	if c.TLSConfig != nil {
+		tlsConn := tls.Client(serverConn, c.TLSConfig)
+		if err := tlsConn.Handshake(); err != nil {
+			slog.Error("Client mTLS handshake failed", "local_addr", localAddr, "error", err)
 			return
 		}
+		serverConn = tlsConn
 	}
 
 	ecdhPriv, mlkemPriv, clientBlob, err := crypto.GenerateClientInception()
@@ -85,7 +85,7 @@ func (c *Client) handleConnection(localConn net.Conn) {
 		return
 	}
 
-	serverResponseBlob := make([]byte, 32+1088)
+	serverResponseBlob := make([]byte, crypto.ServerResponseSize)
 	if _, err := io.ReadFull(serverConn, serverResponseBlob); err != nil {
 		slog.Error("Client failed to read server handshake response", "local_addr", localAddr, "error", err)
 		return
