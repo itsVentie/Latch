@@ -25,3 +25,34 @@ func TestProxyPipe(t *testing.T) {
 		t.Errorf("Expected %s, got %s", testData, buf[:n])
 	}
 }
+
+func BenchmarkProxyPipe(b *testing.B) {
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+
+	data := make([]byte, 16384)
+	for i := range data {
+		data[i] = 'A'
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+
+	go func() {
+		buf := make([]byte, 16384)
+		for {
+			_, err := server.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	for i := 0; i < b.N; i++ {
+		_, err := client.Write(data)
+		if err != nil {
+			b.Fatalf("Benchmark write failed: %v", err)
+		}
+	}
+}
