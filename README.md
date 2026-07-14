@@ -1,4 +1,4 @@
-# pqc-proxy (Hybrid Post-Quantum TCP Tunnel)
+# Latch (Hybrid Post-Quantum Tunnel)
 
 A lightweight infrastructure proxy server engineered to secure legacy TCP traffic against interception and future quantum cryptanalysis (Shor's algorithm).
 
@@ -7,29 +7,30 @@ A lightweight infrastructure proxy server engineered to secure legacy TCP traffi
 * **Asynchronous Handshake Architecture:** Moved the server-side TLS handshake into a concurrent worker pool context. This unblocks the primary `Accept` loop, preventing deadlocks and eliminating socket read reset errors (`wsarecv`).
 * **Automated Multi-Platform Pipeline:** Enhanced the `test.ps1` script to automatically cross-compile optimized production binaries for both Windows (`amd64`) and Linux (`amd64`), isolating them inside the newly managed `./dist/` directory.
 * **Zero-Allocation Data Path:** Maintained strict zero-pressure memory recycling (**0 B/op**, **0 allocs/op**) across the core `proxyPipe` data routing layer via structured `sync.Pool` byte-buffer reuse.
+* **Native Go Fuzzing Pipeline:** Introduced automated fuzzing (`FuzzSecureConnRead`) for the custom binary frame parser to secure the data path against memory-exhaustion vectors and out-of-bounds reads.
 
 ## Why Post-Quantum?
-Traditional asymmetric cryptography (RSA, ECDH) is fundamentally vulnerable to future quantum computing scaling. `pqc-proxy` establishes a dual-defense security perimeter:
+Traditional asymmetric cryptography (RSA, ECDH) is fundamentally vulnerable to future quantum computing scaling. `latch` establishes a dual-defense security perimeter:
 1. **Transport Layer (mTLS):** X509 certificate-based mutual authentication.
 2. **Post-Quantum Layer:** Hybrid Key Encapsulation Mechanism combining classical **X25519** (ECDH) and quantum-resistant **ML-KEM-768** (NIST FIPS 203).
 
 ## Quick Start Topology
 ```text
-[Client App] -> (Local:3000) -> [PQC Client] -> (mTLS + PQC Tunnel) -> [PQC Server] -> (Target:8000) -> [Backend App]
+[Client App] -> (Local:3000) -> [Latch Client] -> (mTLS + PQC Tunnel) -> [Latch Server] -> (Target:8000) -> [Backend App]
 
 ```
 
 ### Start Server
 
 ```bash
-./pqc-proxy -mode server -listen :9090 -target 127.0.0.1:8000
+./latch -mode server -listen :9090 -target 127.0.0.1:8000
 
 ```
 
 ### Start Client
 
 ```bash
-./pqc-proxy -mode client -listen :3000 -target 127.0.0.1:9090
+./latch -mode client -listen :3000 -target 127.0.0.1:9090
 
 ```
 
@@ -37,10 +38,10 @@ Traditional asymmetric cryptography (RSA, ECDH) is fundamentally vulnerable to f
 
 ## Verification & Automation
 
-The project includes a comprehensive verification workflow via PowerShell to perform static code analysis, race detection, and localized artifact compilation:
+The project includes a comprehensive verification workflow via PowerShell to perform static code analysis, fast fuzzing sanity checks, race detection, and localized artifact compilation:
 
 ```powershell
-# Run formatter, linter, race detector, and compile binaries to /dist
+# Run formatter, tidy modules, lint, fuzz (3s), race detector, and compile binaries to /dist
 .\test.ps1
 
 ```
@@ -49,6 +50,13 @@ To profile execution times, packet routing efficiency, and memory allocations un
 
 ```bash
 go test -run=^$ -bench=BenchmarkProxyPipe -benchmem ./internal/network/tests/...
+
+```
+
+To run the frame parser fuzzing pipeline independently:
+
+```bash
+go test -fuzz=FuzzSecureConnRead -fuzztime=10s ./internal/crypto
 
 ```
 
@@ -67,5 +75,7 @@ The communication sequence utilizes a modern defense-in-depth model:
 * [x] Zero-Allocation Network Pipeline (`sync.Pool`)
 * [x] Certificate-based Authentication / Mutual TLS (mTLS)
 * [x] Automated Automated Multi-OS Build Pipeline (`/dist`)
+* [x] Native Go Fuzzing for custom frame parsing and handshake logic
 * [ ] Session Resumption (Fast Reconnect) for Hybrid Handshakes
 * [ ] UDP Encapsulation / Tunneling Mode
+* [ ] Support transparent proxying (TPROXY) and iptables redirection
