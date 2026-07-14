@@ -1,4 +1,4 @@
-name: PQC-Tunnel CI/CD
+name: Latch CI/CD
 
 on:
   push:
@@ -8,21 +8,46 @@ on:
 
 jobs:
   test:
+    name: Code Quality & Testing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
-      - name: Run Tests
-        run: go test -v ./internal/...
+          cache: true
+
+      - name: Verify Go Modules
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
+      - name: Run Fast Fuzzing Check (5s)
+        run: go test -v -fuzz=FuzzSecureConnRead -fuzztime=5s ./internal/crypto
+
+      - name: Run Tests with Race Detector
+        run: go test -v -race ./...
 
   build:
+    name: Build & Package Validation
     needs: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build Binary (Validation)
+        run: go build -v -ldflags="-s -w" -o dist/latch ./cmd/pqc-proxy
+
       - name: Build Docker Image
         run: |
-          docker build -t pqc-tunnel:latest ./deployments
+          docker build -t latch:latest -f ./deployments/Dockerfile .
