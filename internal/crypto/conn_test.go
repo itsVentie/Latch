@@ -49,7 +49,9 @@ func TestSecureConnectionDataTransfer(t *testing.T) {
 		var total int
 		for total < len(message) {
 			n, readErr := secureServer.Read(receivedData[total:])
-			total += n
+			if n > 0 {
+				total += n
+			}
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) {
 					break
@@ -57,6 +59,11 @@ func TestSecureConnectionDataTransfer(t *testing.T) {
 				errChan <- readErr
 				return
 			}
+		}
+
+		if total != len(message) {
+			errChan <- errors.New("did not receive the expected amount of data")
+			return
 		}
 
 		if !bytes.Equal(receivedData, message) {
