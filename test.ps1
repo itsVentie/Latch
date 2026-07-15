@@ -6,7 +6,7 @@ Write-Host "--- Checking Go Formatter (go fmt) ---" -ForegroundColor Yellow
 $fmtFiles = go fmt ./...
 if ($fmtFiles) {
     Write-Host "The following files were not properly formatted and have been fixed:" -ForegroundColor Yellow
-    $fmtFiles | ForEach-Object { Write-Host "  $_" -ForegroundColor Match }
+    $fmtFiles | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
     Write-Host "Please commit the formatted files." -ForegroundColor Red
     exit 1
 }
