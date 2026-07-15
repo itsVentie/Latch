@@ -1,5 +1,3 @@
-#!/usr/bin/env bash
-
 set -e
 
 GREEN='\033[0;32m'
@@ -7,7 +5,7 @@ YELLOW='\033[1;33m'
 RED='\033[0;31m'
 CYAN='\033[0;36m'
 GRAY='\033[0;90m'
-NC='\033[0m'
+NC='\033[0m' 
 
 echo -e "${CYAN}Running comprehensive checks...${NC}"
 
@@ -62,7 +60,7 @@ if ! go test -v -race ./...; then
     exit 1
 fi
 
-echo -e "${GREEN}--- Building project for Windows and Linux ---${NC}"
+echo -e "${GREEN}--- Building project for Windows, Linux and macOS ---${NC}"
 
 PACKAGE_PATH="./cmd/pqc-proxy"
 DIST_DIR="./dist"
@@ -83,4 +81,18 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
-echo -e "${GREEN}Everything is OK. Both builds saved to /dist successfully${NC}"
+echo -e "${YELLOW}Building macOS Intel binary (dist/latch-darwin-amd64)...${NC}"
+GOOS=darwin GOARCH=amd64 go build -ldflags="-s -w" -o "$DIST_DIR/latch-darwin-amd64" "$PACKAGE_PATH"
+if [ $? -ne 0 ]; then
+    echo -e "${RED}macOS Intel build failed.${NC}"
+    exit 1
+fi
+
+echo -e "${YELLOW}Building macOS Apple Silicon binary (dist/latch-darwin-arm64)...${NC}"
+GOOS=darwin GOARCH=arm64 go build -ldflags="-s -w" -o "$DIST_DIR/latch-darwin-arm64" "$PACKAGE_PATH"
+if [ $? -ne 0 ]; then
+    echo -e "${RED}macOS Apple Silicon build failed.${NC}"
+    exit 1
+fi
+
+echo -e "${GREEN}Everything is OK. All builds saved to /dist successfully${NC}"
