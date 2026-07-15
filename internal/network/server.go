@@ -7,24 +7,27 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"time"
 
 	"pqc-proxy/internal/crypto"
 )
 
 type Server struct {
-	listenAddr string
-	targetAddr string
-	listener   net.Listener
-	pqcKeys    *crypto.PQCKeyPair
-	TLSConfig  *tls.Config
+	listenAddr   string
+	targetAddr   string
+	listener     net.Listener
+	pqcKeys      *crypto.PQCKeyPair
+	TLSConfig    *tls.Config
+	sessionStore *SessionStore
 }
 
 func NewServer(listenAddr, targetAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Server {
 	return &Server{
-		listenAddr: listenAddr,
-		targetAddr: targetAddr,
-		pqcKeys:    keys,
-		TLSConfig:  tlsConfig,
+		listenAddr:   listenAddr,
+		targetAddr:   targetAddr,
+		pqcKeys:      keys,
+		TLSConfig:    tlsConfig,
+		sessionStore: NewSessionStore(24 * time.Hour),
 	}
 }
 
@@ -70,21 +73,66 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 
 	slog.Debug("Handling incoming server connection", "remote_addr", remoteAddr)
 
-	clientInceptionBlob := make([]byte, crypto.ClientInceptionSize)
-	if _, err := io.ReadFull(clientConn, clientInceptionBlob); err != nil {
-		slog.Error("Failed to read server inception blob", "remote_addr", remoteAddr, "error", err)
-		return
-	}
-
-	masterKey, responseBlob, err := crypto.ServerHandleInception(clientInceptionBlob)
+	hello, err := ReadHandshakeHello(clientConn)
 	if err != nil {
-		slog.Error("Server PQC inception handling failed", "remote_addr", remoteAddr, "error", err)
+		slog.Error("Failed to read handshake hello from client", "remote_addr", remoteAddr, "error", err)
 		return
 	}
 
-	if _, err := clientConn.Write(responseBlob); err != nil {
-		slog.Error("Failed to write server handshake response", "remote_addr", remoteAddr, "error", err)
-		return
+	var masterKey []byte
+	var sessionID []byte
+	resumed := false
+
+	if len(hello.SessionID) > 0 {
+		if cachedKey, ok := s.sessionStore.Get(hello.SessionID); ok {
+			masterKey = cachedKey
+			sessionID = hello.SessionID
+			resumed = true
+			slog.Info("Session resumption requested and approved", "remote_addr", remoteAddr, "session_id", fmt.Sprintf("%x", sessionID[:8]))
+
+			response := &ServerHello{
+				SessionResumed: true,
+				SessionID:      sessionID,
+			}
+			if err := WriteServerHello(clientConn, response); err != nil {
+				slog.Error("Failed to write server hello resumption response", "remote_addr", remoteAddr, "error", err)
+				return
+			}
+		}
+	}
+
+	if !resumed {
+		if len(hello.ClientEphPub) == 0 || len(hello.ClientKEMPub) == 0 {
+			slog.Error("Invalid handshake hello for full handshake", "remote_addr", remoteAddr)
+			return
+		}
+
+		clientInceptionBlob := append(hello.ClientEphPub, hello.ClientKEMPub...)
+		var responseBlob []byte
+		masterKey, responseBlob, err = crypto.ServerHandleInception(clientInceptionBlob)
+		if err != nil {
+			slog.Error("Server PQC inception handling failed", "remote_addr", remoteAddr, "error", err)
+			return
+		}
+
+		sessionID, err = s.sessionStore.GenerateSessionID()
+		if err != nil {
+			slog.Error("Failed to generate session ID", "remote_addr", remoteAddr, "error", err)
+			return
+		}
+
+		s.sessionStore.Put(sessionID, masterKey)
+
+		response := &ServerHello{
+			SessionResumed: false,
+			SessionID:      sessionID,
+			ServerEphPub:   responseBlob[:32],
+			ClientKEMCiph:  responseBlob[32:],
+		}
+		if err := WriteServerHello(clientConn, response); err != nil {
+			slog.Error("Failed to write server hello full handshake response", "remote_addr", remoteAddr, "error", err)
+			return
+		}
 	}
 
 	secureClientConn, err := crypto.NewSecureConn(clientConn, masterKey)
@@ -94,7 +142,7 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	}
 	crypto.SetServerRoles(secureClientConn)
 
-	slog.Info("Server hybrid handshake completed successfully", "remote_addr", remoteAddr)
+	slog.Info("Server hybrid handshake completed successfully", "remote_addr", remoteAddr, "resumed", resumed)
 
 	targetConn, err := net.Dial("tcp", s.targetAddr)
 	if err != nil {

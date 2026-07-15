@@ -7,16 +7,20 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 
 	"pqc-proxy/internal/crypto"
 )
 
 type Client struct {
-	listenAddr string
-	serverAddr string
-	listener   net.Listener
-	pqcKeys    *crypto.PQCKeyPair
-	TLSConfig  *tls.Config
+	listenAddr      string
+	serverAddr      string
+	listener        net.Listener
+	pqcKeys         *crypto.PQCKeyPair
+	TLSConfig       *tls.Config
+	mu              sync.Mutex
+	cachedSessionID []byte
+	cachedMasterKey []byte
 }
 
 func NewClient(listenAddr, serverAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Client {
@@ -74,27 +78,97 @@ func (c *Client) handleConnection(localConn net.Conn) {
 		serverConn = tlsConn
 	}
 
-	ecdhPriv, mlkemPriv, clientBlob, err := crypto.GenerateClientInception()
-	if err != nil {
-		slog.Error("Client failed to generate PQC inception payload", "local_addr", localAddr, "error", err)
-		return
+	c.mu.Lock()
+	sessionID := c.cachedSessionID
+	cachedMasterKey := c.cachedMasterKey
+	c.mu.Unlock()
+
+	var masterKey []byte
+	var activeSessionID []byte
+	resumed := false
+
+	if len(sessionID) > 0 {
+		slog.Debug("Attempting session resumption", "local_addr", localAddr, "session_id", fmt.Sprintf("%x", sessionID[:8]))
+		hello := &HandshakeHello{
+			SessionID: sessionID,
+		}
+		if err := WriteHandshakeHello(serverConn, hello); err != nil {
+			slog.Error("Client failed to write session resumption hello", "local_addr", localAddr, "error", err)
+			return
+		}
+
+		resp, err := ReadServerHello(serverConn)
+		if err != nil {
+			slog.Error("Client failed to read session resumption response", "local_addr", localAddr, "error", err)
+			return
+		}
+
+		if resp.SessionResumed {
+			slog.Info("Session resumption handshake completed successfully", "local_addr", localAddr)
+			masterKey = cachedMasterKey
+			activeSessionID = sessionID
+			resumed = true
+		} else {
+			slog.Debug("Session resumption rejected by server, falling back to full handshake", "local_addr", localAddr)
+			c.mu.Lock()
+			c.cachedSessionID = nil
+			c.cachedMasterKey = nil
+			c.mu.Unlock()
+			serverConn.Close()
+
+			serverConn, err = net.Dial("tcp", c.serverAddr)
+			if err != nil {
+				slog.Error("Client failed to dial remote PQC server during fallback", "server_addr", c.serverAddr, "error", err)
+				return
+			}
+			defer serverConn.Close()
+
+			if c.TLSConfig != nil {
+				tlsConn := tls.Client(serverConn, c.TLSConfig)
+				if err := tlsConn.Handshake(); err != nil {
+					slog.Error("Client fallback mTLS handshake failed", "local_addr", localAddr, "error", err)
+					return
+				}
+				serverConn = tlsConn
+			}
+		}
 	}
 
-	if _, err := serverConn.Write(clientBlob); err != nil {
-		slog.Error("Client failed to write inception payload to server", "local_addr", localAddr, "error", err)
-		return
-	}
+	if !resumed {
+		ecdhPriv, mlkemPriv, clientBlob, err := crypto.GenerateClientInception()
+		if err != nil {
+			slog.Error("Client failed to generate PQC inception payload", "local_addr", localAddr, "error", err)
+			return
+		}
 
-	serverResponseBlob := make([]byte, crypto.ServerResponseSize)
-	if _, err := io.ReadFull(serverConn, serverResponseBlob); err != nil {
-		slog.Error("Client failed to read server handshake response", "local_addr", localAddr, "error", err)
-		return
-	}
+		hello := &HandshakeHello{
+			ClientEphPub: clientBlob[:32],
+			ClientKEMPub: clientBlob[32:],
+		}
 
-	masterKey, err := crypto.ClientHandleResponse(ecdhPriv, mlkemPriv, serverResponseBlob)
-	if err != nil {
-		slog.Error("Client failed to process server handshake response", "local_addr", localAddr, "error", err)
-		return
+		if err := WriteHandshakeHello(serverConn, hello); err != nil {
+			slog.Error("Client failed to write full handshake hello", "local_addr", localAddr, "error", err)
+			return
+		}
+
+		resp, err := ReadServerHello(serverConn)
+		if err != nil {
+			slog.Error("Client failed to read server handshake response", "local_addr", localAddr, "error", err)
+			return
+		}
+
+		serverResponseBlob := append(resp.ServerEphPub, resp.ClientKEMCiph...)
+		masterKey, err = crypto.ClientHandleResponse(ecdhPriv, mlkemPriv, serverResponseBlob)
+		if err != nil {
+			slog.Error("Client failed to process server handshake response", "local_addr", localAddr, "error", err)
+			return
+		}
+
+		activeSessionID = resp.SessionID
+		c.mu.Lock()
+		c.cachedSessionID = resp.SessionID
+		c.cachedMasterKey = masterKey
+		c.mu.Unlock()
 	}
 
 	secureServerConn, err := crypto.NewSecureConn(serverConn, masterKey)
@@ -104,7 +178,7 @@ func (c *Client) handleConnection(localConn net.Conn) {
 	}
 	crypto.SetClientRoles(secureServerConn)
 
-	slog.Info("Client hybrid handshake completed successfully", "local_addr", localAddr)
+	slog.Info("Client hybrid handshake completed successfully", "local_addr", localAddr, "resumed", resumed, "session_id", fmt.Sprintf("%x", activeSessionID[:8]))
 
 	errChan := make(chan error, 2)
 	go func() { errChan <- proxyPipe(localConn, secureServerConn) }()
