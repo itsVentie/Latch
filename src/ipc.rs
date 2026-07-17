@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 pub struct SessionContext {
     pub session_id: String,
     pub crypto_key: String,
+    pub listen_addr: String,
     pub remote_addr: String,
     pub protocol: String,
 }

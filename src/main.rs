@@ -1,6 +1,6 @@
 use std::error::Error;
-use tokio::net::TcpListener;
 use std::net::SocketAddr;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
 
 mod ipc;
@@ -34,10 +34,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 Err(_) => return,
                             };
 
-                            if ctx.protocol.to_uppercase() == "UDP" {
-                                let manager = UdpSessionManager::new(&key_bytes, remote_addr);
-                                let listen_addr: SocketAddr = "0.0.0.0:3000".parse().unwrap();
-                                let _ = manager.start_local_listener(listen_addr).await;
+                            let proto = ctx.protocol.to_uppercase();
+
+                            if proto == "UDP" {
+                                let listen_addr: SocketAddr = match ctx.listen_addr.parse() {
+                                    Ok(addr) => addr,
+                                    Err(_) => return,
+                                };
+
+                                tokio::spawn(async move {
+                                    let manager = UdpSessionManager::new(&key_bytes, remote_addr);
+                                    let _ = manager.start_local_listener(listen_addr).await;
+                                });
+                            } else if proto == "TCP" {
+                                let listen_addr: SocketAddr = match ctx.listen_addr.parse() {
+                                    Ok(addr) => addr,
+                                    Err(_) => return,
+                                };
+
+                                tokio::spawn(async move {
+                                    if let Ok(tcp_listener) = TcpListener::bind(listen_addr).await {
+                                        while let Ok((client_stream, _)) = tcp_listener.accept().await {
+                                            if let Ok(remote_stream) = TcpStream::connect(remote_addr).await {
+                                                tokio::spawn(async move {
+                                                    let _ = tcp_engine::handle_tcp_proxy(client_stream, remote_stream).await;
+                                                });
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         }
                     }

@@ -2,9 +2,7 @@ package network
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -15,12 +13,15 @@ import (
 type Client struct {
 	listenAddr      string
 	serverAddr      string
-	listener        net.Listener
+	tcpListener     net.Listener
+	udpListener     *net.UDPConn
 	pqcKeys         *crypto.PQCKeyPair
 	TLSConfig       *tls.Config
 	mu              sync.Mutex
 	cachedSessionID []byte
 	cachedMasterKey []byte
+	running         bool
+	handshakeDone   bool
 }
 
 func NewClient(listenAddr, serverAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Client {
@@ -33,38 +34,100 @@ func NewClient(listenAddr, serverAddr string, keys *crypto.PQCKeyPair, tlsConfig
 }
 
 func (c *Client) Start() error {
+	c.mu.Lock()
+	c.running = true
+	c.mu.Unlock()
+
 	var err error
-	c.listener, err = net.Listen("tcp", c.listenAddr)
+	c.tcpListener, err = net.Listen("tcp", c.listenAddr)
 	if err != nil {
-		return fmt.Errorf("client failed to listen: %w", err)
+		return fmt.Errorf("client failed to listen TCP: %w", err)
 	}
 
-	for {
-		localConn, err := c.listener.Accept()
-		if err != nil {
-			slog.Error("Failed to accept local client connection", "error", err)
-			return nil
-		}
-
-		go c.handleConnection(localConn)
+	uAddr, err := net.ResolveUDPAddr("udp", c.listenAddr)
+	if err != nil {
+		c.tcpListener.Close()
+		return fmt.Errorf("client failed to resolve UDP address: %w", err)
 	}
+	c.udpListener, err = net.ListenUDP("udp", uAddr)
+	if err != nil {
+		c.tcpListener.Close()
+		return fmt.Errorf("client failed to listen UDP: %w", err)
+	}
+
+	go c.listenTCP()
+	go c.listenUDP()
+
+	return nil
 }
 
 func (c *Client) Stop() {
-	if c.listener != nil {
-		c.listener.Close()
+	c.mu.Lock()
+	c.running = false
+	c.mu.Unlock()
+
+	if c.tcpListener != nil {
+		c.tcpListener.Close()
+	}
+	if c.udpListener != nil {
+		c.udpListener.Close()
 	}
 }
 
-func (c *Client) handleConnection(localConn net.Conn) {
-	defer localConn.Close()
-	localAddr := localConn.RemoteAddr().String()
+func (c *Client) listenTCP() {
+	for {
+		conn, err := c.tcpListener.Accept()
+		if err != nil {
+			return
+		}
+		c.mu.Lock()
+		done := c.handshakeDone
+		c.mu.Unlock()
 
-	slog.Debug("Handling incoming local client connection", "local_addr", localAddr)
+		if !done {
+			go c.triggerHandshakeAndDelegation(conn.RemoteAddr().String(), "TCP")
+			conn.Close()
+		} else {
+			conn.Close()
+		}
+	}
+}
+
+func (c *Client) listenUDP() {
+	buf := make([]byte, 2048)
+	for {
+		n, remoteAddr, err := c.udpListener.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		if n == 0 {
+			continue
+		}
+
+		c.mu.Lock()
+		done := c.handshakeDone
+		c.mu.Unlock()
+
+		if !done {
+			go c.triggerHandshakeAndDelegation(remoteAddr.String(), "UDP")
+		} else {
+		}
+	}
+}
+
+func (c *Client) triggerHandshakeAndDelegation(srcAddr string, protocol string) {
+	c.mu.Lock()
+	if c.handshakeDone {
+		c.mu.Unlock()
+		return
+	}
+	c.mu.Unlock()
+
+	slog.Debug("Handling incoming client traffic trigger", "addr", srcAddr, "protocol", protocol)
 
 	serverConn, err := net.Dial("tcp", c.serverAddr)
 	if err != nil {
-		slog.Error("Client failed to dial remote PQC server", "server_addr", c.serverAddr, "local_addr", localAddr, "error", err)
+		slog.Error("Client failed to dial remote PQC server", "server_addr", c.serverAddr, "error", err)
 		return
 	}
 	defer serverConn.Close()
@@ -72,7 +135,7 @@ func (c *Client) handleConnection(localConn net.Conn) {
 	if c.TLSConfig != nil {
 		tlsConn := tls.Client(serverConn, c.TLSConfig)
 		if err := tlsConn.Handshake(); err != nil {
-			slog.Error("Client mTLS handshake failed", "local_addr", localAddr, "error", err)
+			slog.Error("Client mTLS handshake failed", "error", err)
 			return
 		}
 		serverConn = tlsConn
@@ -88,48 +151,14 @@ func (c *Client) handleConnection(localConn net.Conn) {
 	resumed := false
 
 	if len(sessionID) > 0 {
-		slog.Debug("Attempting session resumption", "local_addr", localAddr, "session_id", fmt.Sprintf("%x", sessionID[:8]))
-		hello := &HandshakeHello{
-			SessionID: sessionID,
-		}
-		if err := WriteHandshakeHello(serverConn, hello); err != nil {
-			slog.Error("Client failed to write session resumption hello", "local_addr", localAddr, "error", err)
-			return
-		}
-
-		resp, err := ReadServerHello(serverConn)
-		if err != nil {
-			slog.Error("Client failed to read session resumption response", "local_addr", localAddr, "error", err)
-			return
-		}
-
-		if resp.SessionResumed {
-			slog.Info("Session resumption handshake completed successfully", "local_addr", localAddr)
-			masterKey = cachedMasterKey
-			activeSessionID = sessionID
-			resumed = true
-		} else {
-			slog.Debug("Session resumption rejected by server, falling back to full handshake", "local_addr", localAddr)
-			c.mu.Lock()
-			c.cachedSessionID = nil
-			c.cachedMasterKey = nil
-			c.mu.Unlock()
-			serverConn.Close()
-
-			serverConn, err = net.Dial("tcp", c.serverAddr)
-			if err != nil {
-				slog.Error("Client failed to dial remote PQC server during fallback", "server_addr", c.serverAddr, "error", err)
-				return
-			}
-			defer serverConn.Close()
-
-			if c.TLSConfig != nil {
-				tlsConn := tls.Client(serverConn, c.TLSConfig)
-				if err := tlsConn.Handshake(); err != nil {
-					slog.Error("Client fallback mTLS handshake failed", "local_addr", localAddr, "error", err)
-					return
-				}
-				serverConn = tlsConn
+		hello := &HandshakeHello{SessionID: sessionID}
+		if err := WriteHandshakeHello(serverConn, hello); err == nil {
+			resp, err := ReadServerHello(serverConn)
+			if err == nil && resp.SessionResumed {
+				slog.Info("Session resumption completed successfully", "protocol", protocol)
+				masterKey = cachedMasterKey
+				activeSessionID = sessionID
+				resumed = true
 			}
 		}
 	}
@@ -137,7 +166,7 @@ func (c *Client) handleConnection(localConn net.Conn) {
 	if !resumed {
 		ecdhPriv, mlkemPriv, clientBlob, err := crypto.GenerateClientInception()
 		if err != nil {
-			slog.Error("Client failed to generate PQC inception payload", "local_addr", localAddr, "error", err)
+			slog.Error("Client failed to generate PQC payload", "error", err)
 			return
 		}
 
@@ -147,20 +176,20 @@ func (c *Client) handleConnection(localConn net.Conn) {
 		}
 
 		if err := WriteHandshakeHello(serverConn, hello); err != nil {
-			slog.Error("Client failed to write full handshake hello", "local_addr", localAddr, "error", err)
+			slog.Error("Client failed to write handshake hello", "error", err)
 			return
 		}
 
 		resp, err := ReadServerHello(serverConn)
 		if err != nil {
-			slog.Error("Client failed to read server handshake response", "local_addr", localAddr, "error", err)
+			slog.Error("Client failed to read server response", "error", err)
 			return
 		}
 
 		serverResponseBlob := append(resp.ServerEphPub, resp.ClientKEMCiph...)
 		masterKey, err = crypto.ClientHandleResponse(ecdhPriv, mlkemPriv, serverResponseBlob)
 		if err != nil {
-			slog.Error("Client failed to process server handshake response", "local_addr", localAddr, "error", err)
+			slog.Error("Client failed to process response", "error", err)
 			return
 		}
 
@@ -171,22 +200,23 @@ func (c *Client) handleConnection(localConn net.Conn) {
 		c.mu.Unlock()
 	}
 
-	secureServerConn, err := crypto.NewSecureConn(serverConn, masterKey)
+	slog.Info("Client handshake completed successfully", "protocol", protocol, "resumed", resumed)
+
+	c.mu.Lock()
+	c.handshakeDone = true
+	c.mu.Unlock()
+
+	if protocol == "UDP" && c.udpListener != nil {
+		c.udpListener.Close()
+	} else if protocol == "TCP" && c.tcpListener != nil {
+		c.tcpListener.Close()
+	}
+
+	err = ForwardContextToDataplane(fmt.Sprintf("%x", activeSessionID), masterKey, c.listenAddr, c.serverAddr, protocol)
 	if err != nil {
-		slog.Error("Client failed to wrap secure connection layer", "local_addr", localAddr, "error", err)
+		slog.Error("Client failed to forward context to rust dataplane", "error", err)
 		return
 	}
-	crypto.SetClientRoles(secureServerConn)
 
-	slog.Info("Client hybrid handshake completed successfully", "local_addr", localAddr, "resumed", resumed, "session_id", fmt.Sprintf("%x", activeSessionID[:8]))
-
-	errChan := make(chan error, 2)
-	go func() { errChan <- proxyPipe(localConn, secureServerConn) }()
-	go func() { errChan <- proxyPipe(secureServerConn, localConn) }()
-
-	if pipeErr := <-errChan; pipeErr != nil && !errors.Is(pipeErr, io.EOF) {
-		slog.Error("Client tunnel pipe closed with error", "local_addr", localAddr, "error", pipeErr)
-	} else {
-		slog.Info("Client tunnel pipe connection closed cleanly", "local_addr", localAddr)
-	}
+	slog.Info("Client control plane delegated processing to rust dataplane", "protocol", protocol)
 }

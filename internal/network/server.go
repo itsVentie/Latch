@@ -135,33 +135,15 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 		}
 	}
 
-	secureClientConn, err := crypto.NewSecureConn(clientConn, masterKey)
-	if err != nil {
-		slog.Error("Failed to establish secure server connection layer", "remote_addr", remoteAddr, "error", err)
-		return
-	}
-	crypto.SetServerRoles(secureClientConn)
-
 	slog.Info("Server hybrid handshake completed successfully", "remote_addr", remoteAddr, "resumed", resumed)
 
-	targetConn, err := net.Dial("tcp", s.targetAddr)
+	err = ForwardContextToDataplane(fmt.Sprintf("%x", sessionID), masterKey, s.listenAddr, s.targetAddr, "UDP")
 	if err != nil {
-		slog.Error("Server failed to dial target backend", "target_addr", s.targetAddr, "remote_addr", remoteAddr, "error", err)
+		slog.Error("Server failed to forward context to rust dataplane", "error", err)
 		return
 	}
-	defer targetConn.Close()
 
-	slog.Debug("Server connected to target backend", "target_addr", s.targetAddr)
-
-	errChan := make(chan error, 2)
-	go func() { errChan <- proxyPipe(secureClientConn, targetConn) }()
-	go func() { errChan <- proxyPipe(targetConn, secureClientConn) }()
-
-	if pipeErr := <-errChan; pipeErr != nil && !errors.Is(pipeErr, io.EOF) {
-		slog.Error("Server tunnel pipe closed with error", "remote_addr", remoteAddr, "error", pipeErr)
-	} else {
-		slog.Info("Server tunnel pipe connection closed cleanly", "remote_addr", remoteAddr)
-	}
+	slog.Info("Server control plane delegated processing to rust dataplane", "remote_addr", remoteAddr)
 }
 
 func proxyPipe(dst io.Writer, src io.Reader) error {

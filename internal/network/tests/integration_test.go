@@ -6,7 +6,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"io"
 	"math/big"
 	"net"
 	"testing"
@@ -22,19 +21,26 @@ func TestEndToEndProxy(t *testing.T) {
 		t.Fatalf("Failed to generate PQC keys for test: %v", err)
 	}
 
-	target, err := net.Listen("tcp", "127.0.0.1:8000")
+	targetAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:8000")
 	if err != nil {
-		t.Fatalf("Failed to bind target: %v", err)
+		t.Fatalf("Failed to resolve target UDP address: %v", err)
+	}
+
+	target, err := net.ListenUDP("udp", targetAddr)
+	if err != nil {
+		t.Fatalf("Failed to bind target UDP: %v", err)
 	}
 	defer target.Close()
 
 	go func() {
-		conn, err := target.Accept()
-		if err != nil {
-			return
+		buf := make([]byte, 2048)
+		for {
+			n, remoteAddr, err := target.ReadFromUDP(buf)
+			if err != nil {
+				return
+			}
+			_, _ = target.WriteToUDP(buf[:n], remoteAddr)
 		}
-		defer conn.Close()
-		_, _ = io.Copy(conn, conn)
 	}()
 
 	srvTLS, cliTLS, err := generateTestmTLSPair()
@@ -54,31 +60,48 @@ func TestEndToEndProxy(t *testing.T) {
 	}()
 	defer cli.Stop()
 
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(200 * time.Millisecond)
 
-	conn, err := net.Dial("tcp", "127.0.0.1:3000")
+	proxyUDPAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:3000")
 	if err != nil {
-		t.Fatalf("Could not connect to client proxy: %v", err)
+		t.Fatalf("Failed to resolve proxy UDP address: %v", err)
 	}
+
+	conn, err := net.DialUDP("udp", nil, proxyUDPAddr)
+	if err != nil {
+		t.Fatalf("Could not connect to client proxy via UDP: %v", err)
+	}
+	defer conn.Close()
 
 	msg := []byte("quantum-safe-data")
-	if _, err := conn.Write(msg); err != nil {
-		conn.Close()
-		t.Fatalf("Failed to write to proxy: %v", err)
+
+	_, _ = conn.Write([]byte("trigger"))
+
+	var n int
+	buf := make([]byte, len(msg)+100)
+
+	for i := 0; i < 10; i++ {
+		time.Sleep(100 * time.Millisecond)
+
+		if _, err := conn.Write(msg); err != nil {
+			continue
+		}
+
+		_ = conn.SetReadDeadline(time.Now().Add(150 * time.Millisecond))
+		n, err = conn.Read(buf)
+		if err == nil {
+			break
+		}
 	}
 
-	buf := make([]byte, len(msg))
-	_, err = io.ReadFull(conn, buf)
 	if err != nil {
-		conn.Close()
-		t.Fatalf("Failed to read from proxy: %v", err)
+		t.Fatalf("Failed to read from proxy after retries: %v", err)
 	}
 
-	if string(buf) != string(msg) {
-		t.Errorf("Expected %s, got %s", msg, buf)
+	if string(buf[:n]) != string(msg) {
+		t.Errorf("Expected %s, got %s", msg, buf[:n])
 	}
 
-	conn.Close()
 	time.Sleep(50 * time.Millisecond)
 }
 
