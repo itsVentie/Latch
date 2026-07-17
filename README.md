@@ -1,16 +1,15 @@
 # Latch (Hybrid Post-Quantum Tunnel)
 
-A lightweight, high-performance infrastructure proxy server engineered to secure legacy TCP traffic against interception and future quantum cryptanalysis (Shor's algorithm).
+A lightweight, high-performance infrastructure proxy server engineered to secure legacy TCP and UDP traffic against interception and future quantum cryptanalysis (Shor's algorithm).
 
 ---
 
-## What's New in 1.1.0 & 1.2.0
+## What's New in 1.3.0
 
-* **Session Resumption (Fast Reconnect):** Integrated a stateful, secure session-resumption layer (using `SessionStore` and AES-GCM Ticket encryption). Clients can now bypass heavy ML-KEM math on reconnect, establishing secure transport in a fraction of the time.
-* **Mutual TLS (mTLS) Transport:** Replaced legacy symmetric pre-shared secrets with a robust, asymmetric Mutual TLS layer. Nodes are verified via an X.509 Public Key Infrastructure (PKI) prior to executing post-quantum handshakes.
-* **Asynchronous Handshake Architecture:** Moved server-side TLS handshakes into a concurrent worker pool context to keep the primary `Accept` loop unblocked, completely eliminating socket read reset errors (`wsarecv`).
-* **Cross-Platform Automation Pipeline:** Upgraded the testing suite. `test.ps1` (Windows) and `test.sh` (Linux/macOS) now automatically perform formatting, module tidying, linter checks, fuzzing, race detection, and cross-compile optimized binaries directly into `./dist/`.
-* **Zero-Allocation Data Path:** Guaranteed raw performance (**0 B/op**, **0 allocs/op**) across the core `proxyPipe` routing layer via structured `sync.Pool` byte-buffer recycling.
+* **Production Split-Process Architecture:** Officially migrated to a fast-path architecture separating the **Go Control Plane** (management, routing, and key agreement) from the native **Rust Data Plane** (high-speed packet processing).
+* **End-to-End UDP Encapsulation (Issue #5 Resolved):** Full tunneling support for UDP traffic. Packets are captured by the proxy, wrapped inside custom quantum-resistant secure frames, encrypted using ChaCha20-Poly1305, and seamlessly decapsulated at the target node.
+* **Deterministic Windows Port Handover:** Re-engineered the control plane socket lifecycle to handle Windows-specific port locking smoothly. Fixed all `WSAEADDRINUSE` collisions and integration test race conditions during Go-to-Rust delegation context transfers.
+* **Session Resumption (Fast Reconnect):** Reuses negotiated hybrid master keys via stateful server-side `SessionStore` ticket management, bypassing expensive ML-KEM math on reconnections.
 
 ---
 
@@ -21,6 +20,33 @@ A lightweight, high-performance infrastructure proxy server engineered to secure
 1. **Network Authentication (mTLS):** A standard TLS 1.3 handshake authenticates both endpoints. Unauthorized packets are dropped immediately, shielding expensive post-quantum mathematical calculations from unauthorized clients.
 2. **Hybrid Post-Quantum Core:** Upon successful transport authorization, an ephemeral **X25519** (classical ECDH) and **ML-KEM-768** (NIST FIPS 203 quantum-resistant KEM) hybrid exchange executes. A 256-bit master key is derived via HKDF-SHA256.
 3. **Payload Encryption:** Packets are encapsulated inside custom binary frames and encrypted using **ChaCha20-Poly1305** authenticated encryption (AEAD).
+
+---
+
+## Production Architecture: Split-Process Fast-Path
+
+Latch leverages a split-process design to achieve maximum throughput, zero garbage collector overhead, and ultra-low latency under heavy high-frequency packet rates.
+
+```text
+                      +------------------------+
+                      |   Latch Go-Control     |  <-- Configuration, mTLS,
+                      |   (Management Plane)   |      PQC Hybrid Handshake
+                      +------------------------+
+                                  |
+                                  | Secures transport context & generates master key
+                                  v (Delegation via IPC / Named Pipes)
++----------------+    +------------------------+    +----------------+
+|  Local Client  | <->|  Latch Rust Dataplane  | <->| Remote Server  |
+|  (TCP / UDP)   |    | (High-Speed Data Path) |    |   (Encrypted)  |
++----------------+    +------------------------+    +----------------+
+                       * Zero-Copy Ring Buffers
+                       * Tokio Async Runtime
+                       * Blazing fast ChaCha20-Poly1305 AEAD
+
+```
+
+* **Control Plane (Go):** Manages the daemon orchestration, mutual TLS (mTLS 1.3) infrastructure, stateful session resumption, and the core post-quantum hybrid key exchange (X25519 + ML-KEM-768). Once authenticated, Go safely delegates the session keys down to the packet engine.
+* **Data Plane (Rust):** A highly optimized, asynchronous native daemon (`latch-dataplane`) that intercepts and processes raw TCP and UDP streams. Built on top of the `tokio` runtime, it bypasses Go's runtime scheduling and GC pauses for heavy packet processing.
 
 ---
 
@@ -35,17 +61,19 @@ A lightweight, high-performance infrastructure proxy server engineered to secure
 
 ## Quick Start
 
+The binary automatically routes traffic depending on whether it intercepts TCP connections or UDP datagrams.
+
 ### Start Server
 
 ```bash
-./latch -mode server -listen :9090 -target 127.0.0.1:8000
+./dist/latch.exe --mode server --listen 127.0.0.1:4000 --target 127.0.0.1:8080 --secret "your-shared-secret" --debug
 
 ```
 
 ### Start Client
 
 ```bash
-./latch -mode client -listen :3000 -target 127.0.0.1:9090
+./dist/latch.exe --mode client --listen 127.0.0.1:3000 --target 127.0.0.1:4000 --secret "your-shared-secret" --debug
 
 ```
 
@@ -55,7 +83,7 @@ A lightweight, high-performance infrastructure proxy server engineered to secure
 
 ## Verification & Automation
 
-Run the full pipeline (static code analysis, fuzzing, race detection, and localized artifact compilation for Windows, Linux, and macOS):
+Run the complete pipeline (formatting, static code analysis, native fuzzing, race detection, and localized cross-compilation for Windows, Linux, and macOS):
 
 ### On Windows (PowerShell):
 
@@ -88,44 +116,16 @@ go test -fuzz=FuzzSecureConnRead -fuzztime=10s ./internal/crypto
 
 ---
 
-## Next-Gen Architecture: Fast-Path Rust Data Plane
-
-To achieve maximum throughput, zero garbage collector overhead, and ultra-low latency under high packet rates (especially for UDP traffic), `Latch` is moving toward a **Control Plane / Data Plane separation** model.
-
-### Split-Process Model (Go + Rust)
-
-```text
-                           +------------------------+
-                           |   Latch Go-Control     |  <-- Config, mTLS,
-                           |   (Management Plane)   |      PQC Handshake
-                           +------------------------+
-                                       |
-                                       | Sends session key & remote details
-                                       v (via Unix Socket / Named Pipe)
-+----------------+         +------------------------+         +----------------+
-|  Local Client  |  <--->  |  Latch Rust Dataplane  |  <--->  | Remote Server  |
-|  (TCP / UDP)   |         | (High-Speed Data Path) |         |  (Encrypted)   |
-+----------------+         +------------------------+         +----------------+
-                             * Zero-Copy Ring Buffers
-                             * Tokio Async Runtime
-                             * AEAD Crypto in Rust
-
-```
-
-* **Control Plane (Go):** Handles the configuration, standard mTLS handshake, PQC hybrid key exchange, and session resumption management. Once a connection is authorized and keys are agreed upon, Go passes the active context down to the fast path.
-* **Data Plane (Rust):** A dedicated, highly-optimized daemon processes the actual TCP/UDP streams. It receives the session keys over a local Unix domain socket (or Windows named pipe), opening high-speed, zero-copy sockets for raw packet forwarding and fast AEAD encryption.
-
----
-
 ## Roadmap
 
 * [x] Hybrid Key Exchange (X25519 + ML-KEM-768)
 * [x] Structured Production Logging via `log/slog`
-* [x] Zero-Allocation Network Pipeline (`sync.Pool`)
+* [x] Zero-Allocation Network Pipeline (`sync.Pool` integration)
 * [x] Certificate-based Authentication / Mutual TLS (mTLS)
 * [x] Automated Multi-OS Build Pipeline (`/dist` for Windows, Linux, macOS)
-* [x] Native Go Fuzzing for custom frame parsing
+* [x] Native Go Fuzzing for custom frame parsing (`FuzzSecureConnRead`)
 * [x] Session Resumption (Fast Reconnect) for Hybrid Handshakes
-* [ ] **Next:** Split-Process Fast-Path Data Plane (Rust acceleration)
-* [ ] UDP Encapsulation / Tunneling Mode
+* [x] Split-Process Fast-Path Data Plane (Rust acceleration engine)
+* [x] UDP Encapsulation / Tunneling Mode (Issue #5 closed)
 * [ ] Transparent proxying (TPROXY) and iptables redirection support
+* [ ] Native File Descriptor passing (`SCM_RIGHTS` / `DuplicateHandle`) via IPC
