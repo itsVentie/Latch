@@ -20,3 +20,7 @@ docker-compose.override.yml
 *.tmp
 dist/
 dist
+
+# Added by cargo
+
+/target
