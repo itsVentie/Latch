@@ -1,3 +1,5 @@
+use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use chacha20poly1305::{ChaCha20Poly1305, Key};
 use std::collections::HashMap;
 use std::error::Error;
 use std::net::SocketAddr;
@@ -5,8 +7,9 @@ use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
-use chacha20poly1305::ChaCha20Poly1305;
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
+use zeroize::Zeroize;
+
+use crate::crypto::SecretKey256;
 
 pub struct UdpSessionManager {
     sessions: Arc<RwLock<HashMap<SocketAddr, Arc<UdpSocket>>>>,
@@ -16,8 +19,10 @@ pub struct UdpSessionManager {
 
 impl UdpSessionManager {
     pub fn new(key_bytes: &[u8], remote_target: SocketAddr) -> Self {
-        let key = chacha20poly1305::Key::from_slice(key_bytes);
+        let secret_key = SecretKey256::from_slice(key_bytes);
+        let key = Key::from_slice(secret_key.as_bytes());
         let cipher = Arc::new(ChaCha20Poly1305::new(key));
+
         Self {
             sessions: Arc::new(RwLock::new(HashMap::new())),
             cipher,
@@ -30,7 +35,14 @@ impl UdpSessionManager {
         let mut buf = vec![0u8; 65535];
 
         loop {
-            let (len, src_addr) = local_socket.recv_from(&mut buf).await?;
+            let (len, src_addr) = match local_socket.recv_from(&mut buf).await {
+                Ok(res) => res,
+                Err(e) => {
+                    buf.zeroize();
+                    return Err(Box::new(e));
+                }
+            };
+
             let sessions_guard = self.sessions.read().await;
 
             let tunnel_socket = match sessions_guard.get(&src_addr) {
@@ -38,18 +50,18 @@ impl UdpSessionManager {
                 None => {
                     drop(sessions_guard);
                     let mut write_guard = self.sessions.write().await;
-                    
+
                     let sock = match write_guard.get(&src_addr) {
                         Some(s) => s.clone(),
                         None => {
                             let s = Arc::new(UdpSocket::bind("0.0.0.0:0").await?);
                             write_guard.insert(src_addr, s.clone());
-                            
+
                             let sessions_clone = self.sessions.clone();
                             let local_socket_clone = local_socket.clone();
                             let cipher_clone = self.cipher.clone();
                             let s_task = s.clone();
-                            
+
                             tokio::spawn(async move {
                                 let mut outbound_buf = vec![0u8; 65535];
                                 loop {
@@ -61,14 +73,16 @@ impl UdpSessionManager {
                                                     msg: &outbound_buf[..out_len],
                                                     aad: &[],
                                                 };
-                                                if let Ok(decrypted) = cipher_clone.decrypt(nonce, payload) {
+                                                if let Ok(mut decrypted) = cipher_clone.decrypt(nonce, payload) {
                                                     let _ = local_socket_clone.send_to(&decrypted, src_addr).await;
+                                                    decrypted.zeroize();
                                                 }
                                             }
                                         }
                                         _ = time::sleep(Duration::from_secs(60)) => {
                                             let mut guard = sessions_clone.write().await;
                                             guard.remove(&src_addr);
+                                            outbound_buf.zeroize();
                                             break;
                                         }
                                     }
@@ -86,8 +100,9 @@ impl UdpSessionManager {
                 msg: &buf[..len],
                 aad: &[],
             };
-            if let Ok(encrypted) = self.cipher.encrypt(nonce, payload) {
+            if let Ok(mut encrypted) = self.cipher.encrypt(nonce, payload) {
                 let _ = tunnel_socket.send_to(&encrypted, self.remote_target).await;
+                encrypted.zeroize();
             }
         }
     }

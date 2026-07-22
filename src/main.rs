@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::AsyncReadExt;
 
+mod crypto;
 mod ipc;
 mod tcp_engine;
 mod udp_engine;
