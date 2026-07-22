@@ -6,9 +6,10 @@ import (
 )
 
 type HandshakeHello struct {
-	SessionID    []byte
-	ClientEphPub []byte
-	ClientKEMPub []byte
+	ClientEphPub  []byte
+	ClientKEMPub  []byte
+	SessionID     []byte
+	SessionTicket []byte
 }
 
 type ServerHello struct {
@@ -16,6 +17,7 @@ type ServerHello struct {
 	SessionID      []byte
 	ServerEphPub   []byte
 	ClientKEMCiph  []byte
+	NewTicket      []byte
 }
 
 func WriteHandshakeHello(w io.Writer, h *HandshakeHello) error {

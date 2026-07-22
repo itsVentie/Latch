@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -15,20 +16,133 @@ type SessionState struct {
 	CreatedAt time.Time
 }
 
-type TicketEncryptor struct {
-	key []byte
+type TdkManager struct {
+	mu          sync.RWMutex
+	currentKey  []byte
+	previousKey []byte
+	interval    time.Duration
+	stopChan    chan struct{}
 }
 
-func NewTicketEncryptor() (*TicketEncryptor, error) {
-	key := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, key); err != nil {
+func ZeroizeMem(b []byte) {
+	for i := range b {
+		b[i] = 0
+	}
+}
+
+func NewTdkManager(rotationInterval time.Duration) (*TdkManager, error) {
+	initialKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, initialKey); err != nil {
 		return nil, err
 	}
-	return &TicketEncryptor{key: key}, nil
+
+	mgr := &TdkManager{
+		currentKey: initialKey,
+		interval:   rotationInterval,
+		stopChan:   make(chan struct{}),
+	}
+
+	if rotationInterval > 0 {
+		go mgr.startAutoRotation()
+	}
+
+	return mgr, nil
 }
 
-func (te *TicketEncryptor) Encrypt(state *SessionState) ([]byte, error) {
-	block, err := aes.NewCipher(te.key)
+func (m *TdkManager) RotateKeys() error {
+	newKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.previousKey != nil {
+		ZeroizeMem(m.previousKey)
+	}
+
+	m.previousKey = m.currentKey
+	m.currentKey = newKey
+
+	return nil
+}
+
+func (m *TdkManager) startAutoRotation() {
+	ticker := time.NewTicker(m.interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			_ = m.RotateKeys()
+		case <-m.stopChan:
+			return
+		}
+	}
+}
+
+func (m *TdkManager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	close(m.stopChan)
+
+	if m.currentKey != nil {
+		ZeroizeMem(m.currentKey)
+		m.currentKey = nil
+	}
+	if m.previousKey != nil {
+		ZeroizeMem(m.previousKey)
+		m.previousKey = nil
+	}
+}
+
+func (m *TdkManager) IssueTicket(state *SessionState) ([]byte, error) {
+	m.mu.RLock()
+	key := make([]byte, len(m.currentKey))
+	copy(key, m.currentKey)
+	m.mu.RUnlock()
+
+	defer ZeroizeMem(key)
+
+	return encryptWithKey(key, state)
+}
+
+func (m *TdkManager) ValidateTicket(ticket []byte) (state *SessionState, needsReissue bool, err error) {
+	m.mu.RLock()
+	currKey := make([]byte, len(m.currentKey))
+	copy(currKey, m.currentKey)
+
+	var prevKey []byte
+	if m.previousKey != nil {
+		prevKey = make([]byte, len(m.previousKey))
+		copy(prevKey, m.previousKey)
+	}
+	m.mu.RUnlock()
+
+	defer ZeroizeMem(currKey)
+	if prevKey != nil {
+		defer ZeroizeMem(prevKey)
+	}
+
+	state, err = decryptWithKey(currKey, ticket)
+	if err == nil {
+		return state, false, nil
+	}
+
+	if prevKey != nil {
+		state, errPrev := decryptWithKey(prevKey, ticket)
+		if errPrev == nil {
+			return state, true, nil
+		}
+	}
+
+	return nil, false, errors.New("failed to decrypt ticket with active keys")
+}
+
+func encryptWithKey(key []byte, state *SessionState) ([]byte, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
@@ -47,12 +161,13 @@ func (te *TicketEncryptor) Encrypt(state *SessionState) ([]byte, error) {
 	copy(plainText[0:32], state.ID)
 	copy(plainText[32:], state.MasterKey)
 
-	cipherText := gcm.Seal(nonce, nonce, plainText, nil)
-	return cipherText, nil
+	defer ZeroizeMem(plainText)
+
+	return gcm.Seal(nonce, nonce, plainText, nil), nil
 }
 
-func (te *TicketEncryptor) Decrypt(ticket []byte) (*SessionState, error) {
-	block, err := aes.NewCipher(te.key)
+func decryptWithKey(key []byte, ticket []byte) (*SessionState, error) {
+	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
@@ -72,6 +187,8 @@ func (te *TicketEncryptor) Decrypt(ticket []byte) (*SessionState, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	defer ZeroizeMem(plainText)
 
 	if len(plainText) < 64 {
 		return nil, errors.New("decrypted data too short")

@@ -1,6 +1,7 @@
 package network
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
@@ -13,21 +14,27 @@ import (
 )
 
 type Server struct {
-	listenAddr   string
-	targetAddr   string
-	listener     net.Listener
-	pqcKeys      *crypto.PQCKeyPair
-	TLSConfig    *tls.Config
-	sessionStore *SessionStore
+	listenAddr string
+	targetAddr string
+	listener   net.Listener
+	pqcKeys    *crypto.PQCKeyPair
+	TLSConfig  *tls.Config
+	tdkMgr     *crypto.TdkManager
 }
 
 func NewServer(listenAddr, targetAddr string, keys *crypto.PQCKeyPair, tlsConfig *tls.Config) *Server {
+	tdkMgr, err := crypto.NewTdkManager(4 * time.Hour)
+	if err != nil {
+		slog.Error("Failed to initialize TDK manager", "error", err)
+		return nil
+	}
+
 	return &Server{
-		listenAddr:   listenAddr,
-		targetAddr:   targetAddr,
-		pqcKeys:      keys,
-		TLSConfig:    tlsConfig,
-		sessionStore: NewSessionStore(24 * time.Hour),
+		listenAddr: listenAddr,
+		targetAddr: targetAddr,
+		pqcKeys:    keys,
+		TLSConfig:  tlsConfig,
+		tdkMgr:     tdkMgr,
 	}
 }
 
@@ -56,6 +63,9 @@ func (s *Server) Stop() {
 	if s.listener != nil {
 		s.listener.Close()
 	}
+	if s.tdkMgr != nil {
+		s.tdkMgr.Stop()
+	}
 }
 
 func (s *Server) handleConnection(clientConn net.Conn) {
@@ -83,21 +93,31 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 	var sessionID []byte
 	resumed := false
 
-	if len(hello.SessionID) > 0 {
-		if cachedKey, ok := s.sessionStore.Get(hello.SessionID); ok {
-			masterKey = cachedKey
-			sessionID = hello.SessionID
+	if len(hello.SessionTicket) > 0 {
+		state, needsReissue, err := s.tdkMgr.ValidateTicket(hello.SessionTicket)
+		if err == nil {
+			masterKey = state.MasterKey
+			sessionID = state.ID
 			resumed = true
-			slog.Info("Session resumption requested and approved", "remote_addr", remoteAddr, "session_id", fmt.Sprintf("%x", sessionID[:8]))
+			slog.Info("Session resumption requested and approved via ticket", "remote_addr", remoteAddr, "session_id", fmt.Sprintf("%x", sessionID[:8]))
+
+			var newTicket []byte
+			if needsReissue {
+				slog.Debug("Ticket validated via previous TDK key, issuing fresh ticket", "remote_addr", remoteAddr)
+				newTicket, _ = s.tdkMgr.IssueTicket(state)
+			}
 
 			response := &ServerHello{
 				SessionResumed: true,
 				SessionID:      sessionID,
+				NewTicket:      newTicket,
 			}
 			if err := WriteServerHello(clientConn, response); err != nil {
 				slog.Error("Failed to write server hello resumption response", "remote_addr", remoteAddr, "error", err)
 				return
 			}
+		} else {
+			slog.Debug("Ticket validation failed, falling back to full handshake", "remote_addr", remoteAddr, "error", err)
 		}
 	}
 
@@ -115,19 +135,30 @@ func (s *Server) handleConnection(clientConn net.Conn) {
 			return
 		}
 
-		sessionID, err = s.sessionStore.GenerateSessionID()
-		if err != nil {
+		sessionID = make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, sessionID); err != nil {
 			slog.Error("Failed to generate session ID", "remote_addr", remoteAddr, "error", err)
 			return
 		}
 
-		s.sessionStore.Put(sessionID, masterKey)
+		state := &crypto.SessionState{
+			ID:        sessionID,
+			MasterKey: masterKey,
+			CreatedAt: time.Now(),
+		}
+
+		ticket, err := s.tdkMgr.IssueTicket(state)
+		if err != nil {
+			slog.Error("Failed to issue session ticket", "remote_addr", remoteAddr, "error", err)
+			return
+		}
 
 		response := &ServerHello{
 			SessionResumed: false,
 			SessionID:      sessionID,
 			ServerEphPub:   responseBlob[:32],
 			ClientKEMCiph:  responseBlob[32:],
+			NewTicket:      ticket,
 		}
 		if err := WriteServerHello(clientConn, response); err != nil {
 			slog.Error("Failed to write server hello full handshake response", "remote_addr", remoteAddr, "error", err)
